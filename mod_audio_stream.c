@@ -59,7 +59,7 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
 static switch_status_t start_capture(switch_core_session_t *session,
                                      switch_media_bug_flag_t flags,
                                      char *wsUri,
-                                     int sampling,
+                                     int wsSampling,
                                      char *metadata)
 {
     switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -76,7 +76,7 @@ static switch_status_t start_capture(switch_core_session_t *session,
         return SWITCH_STATUS_FALSE;
     }
 
-    if (switch_channel_pre_answer(channel) != SWITCH_STATUS_SUCCESS)
+    if (switch_channel_answer(channel) != SWITCH_STATUS_SUCCESS)
     {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "mod_audio_stream: channel must have reached pre-answer status before calling start!\n");
         return SWITCH_STATUS_FALSE;
@@ -86,7 +86,7 @@ static switch_status_t start_capture(switch_core_session_t *session,
 
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "calling stream_session_init.\n");
     if (SWITCH_STATUS_FALSE == stream_session_init(session, responseHandler, read_codec->implementation->actual_samples_per_second,
-                                                   wsUri, sampling, channels, metadata, &pUserData))
+                                                   wsUri, wsSampling, channels, metadata, &pUserData))
     {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error initializing mod_audio_stream session.\n");
         return SWITCH_STATUS_FALSE;
@@ -98,8 +98,11 @@ static switch_status_t start_capture(switch_core_session_t *session,
     }
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "setting bug private data.\n");
     switch_channel_set_private(channel, MY_BUG_NAME, bug);
-
-    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "exiting start_capture.\n");
+    if (SWITCH_STATUS_FALSE == stream_session_write_thread_init(session, pUserData))
+    {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "error initializing stream session write thread.\n");
+        return SWITCH_STATUS_FALSE;
+    }
     return SWITCH_STATUS_SUCCESS;
 }
 
@@ -215,7 +218,7 @@ SWITCH_STANDARD_API(stream_function)
             {
                 // switch_channel_t *channel = switch_core_session_get_channel(lsession);
                 char wsUri[MAX_WS_URI];
-                int sampling = 8000;
+                int wsSampling = 8000;
                 switch_media_bug_flag_t flags = SMBF_READ_STREAM;
                 char *metadata = argc > 5 ? argv[5] : NULL;
                 if (metadata && (is_valid_utf8(argv[2]) != SWITCH_STATUS_SUCCESS))
@@ -245,15 +248,15 @@ SWITCH_STANDARD_API(stream_function)
                 {
                     if (0 == strcmp(argv[4], "16k"))
                     {
-                        sampling = 16000;
+                        wsSampling = 16000;
                     }
                     else if (0 == strcmp(argv[4], "8k"))
                     {
-                        sampling = 8000;
+                        wsSampling = 8000;
                     }
                     else
                     {
-                        sampling = atoi(argv[4]);
+                        wsSampling = atoi(argv[4]);
                     }
                 }
                 if (!validate_ws_uri(argv[2], &wsUri[0]))
@@ -261,14 +264,14 @@ SWITCH_STANDARD_API(stream_function)
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                                       "invalid websocket uri: %s\n", argv[2]);
                 }
-                else if (sampling % 8000 != 0)
+                else if (wsSampling % 8000 != 0)
                 {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                                       "invalid sample rate: %s\n", argv[4]);
                 }
                 else
                 {
-                    status = start_capture(lsession, flags, wsUri, sampling, metadata);
+                    status = start_capture(lsession, flags, wsUri, wsSampling, metadata);
                 }
             }
             else

@@ -3,3 +3,8 @@ cmake-build-debug/
 .vscode/
 build/
 _packages
+notes.txt
+docker/
+.venv
+tmp/
+recordings/
