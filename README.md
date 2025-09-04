@@ -312,11 +312,43 @@ if __name__ == "__main__":
     uvicorn.run("live:app", host="0.0.0.0", port=8080, reload=False)
 ```
 
+python environment setup
+
 ```shell
 # setup environment with uv
 uv venv --seed -p 3.12 ./.venv
 source .venv/bin/activate
 
-uv pip install loguru scipy fastapi
+uv pip install loguru scipy fastapi 'uvicorn[standard]'
 uv run python echo.py
+```
+
+lua dialplan.lua
+
+```lua
+api = freeswitch.API()
+
+local channel_id = session:get_uuid()
+
+session:execute("set", "playback_delimiter=!")
+session:execute("answer")
+local caller_id_number = session:getVariable("caller_id_number")
+session:execute("set", "result=${uuid_audio_stream ${uuid} start ws://localhost:8080/live/${uuid} mono 16000}")
+freeswitch.consoleLog("INFO", "call answered with channel id [" .. channel_id .. "]")
+session:execute("park")
+
+```
+
+freeswitch xml dialplan
+
+```xml
+<section name="dialplan" description="Regex/XML Dialplan">
+  <context name="internal">
+    <extension name="default">
+      <condition field="destination_number" expression="^(.*)$">
+        <action application="lua" data="/etc/freeswitch/scripts/dialplan.lua" />
+      </condition>
+    </extension>
+  </context>
+</section>
 ```
