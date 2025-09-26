@@ -12,9 +12,13 @@ SWITCH_MODULE_DEFINITION(mod_audio_stream, mod_audio_stream_load, mod_audio_stre
 
 static void responseHandler(switch_core_session_t *session, const char *eventName, const char *json)
 {
-    switch_event_t *event;
+    switch_event_t *event = NULL;
     switch_channel_t *channel = switch_core_session_get_channel(session);
-    switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, eventName);
+    if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, eventName) != SWITCH_STATUS_SUCCESS || !event)
+    {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "mod_audio_stream: failed to create event for %s\n", eventName);
+        return;
+    }
     switch_channel_event_set_data(channel, event);
     if (json)
         switch_event_add_body(event, "%s", json);
@@ -83,6 +87,11 @@ static switch_status_t start_capture(switch_core_session_t *session,
     }
 
     read_codec = switch_core_session_get_read_codec(session);
+    if (!read_codec || !read_codec->implementation)
+    {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "mod_audio_stream: no read codec available, aborting start\n");
+        return SWITCH_STATUS_FALSE;
+    }
 
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "calling stream_session_init.\n");
     if (SWITCH_STATUS_FALSE == stream_session_init(session, responseHandler, read_codec->implementation->actual_samples_per_second,
@@ -91,6 +100,7 @@ static switch_status_t start_capture(switch_core_session_t *session,
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error initializing mod_audio_stream session.\n");
         return SWITCH_STATUS_FALSE;
     }
+
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "adding bug.\n");
     if ((status = switch_core_media_bug_add(session, MY_BUG_NAME, NULL, capture_callback, pUserData, 0, flags, &bug)) != SWITCH_STATUS_SUCCESS)
     {
@@ -168,7 +178,7 @@ SWITCH_STANDARD_API(stream_function)
 
     if (zstr(cmd) || argc < 2 || (0 == strcmp(argv[1], "start") && argc < 4))
     {
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error with command %s %s %s.\n", cmd, argv[0], argv[1]);
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error with command %s %s %s.\n", cmd ? cmd : "", argv[0] ? argv[0] : "", argv[1] ? argv[1] : "");
         stream->write_function(stream, "-USAGE: %s\n", STREAM_API_SYNTAX);
         goto done;
     }

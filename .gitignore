@@ -8,3 +8,4 @@ docker/
 .venv
 tmp/
 recordings/
+.DS_Store

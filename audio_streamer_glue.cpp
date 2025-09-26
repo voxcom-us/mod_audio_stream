@@ -446,6 +446,12 @@ namespace
         }
 
         private_t *tech_pvt = (private_t *)switch_core_media_bug_get_user_data(bug);
+        if (!tech_pvt)
+        {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "write_frame_thread: missing tech_pvt\n");
+            return NULL;
+        }
+
         switch_status_t status = SWITCH_STATUS_FALSE;
         switch_timer_t timer = {0};
         switch_frame_t write_frame = {0};
@@ -456,6 +462,12 @@ namespace
         uint32_t channels = tech_pvt->channels;
 
         read_codec = switch_core_session_get_read_codec(session);
+        if (!read_codec || !read_codec->implementation)
+        {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "write_frame_thread: no read codec available, shutting down\n");
+            return NULL;
+        }
+
         uint32_t interval = read_codec->implementation->microseconds_per_packet / 1000;
         uint32_t samples = switch_samples_per_packet(sample_rate, interval);
         uint32_t tsamples = read_codec->implementation->actual_samples_per_second;
@@ -478,8 +490,8 @@ namespace
 
         if (switch_core_timer_init(&timer, "soft", interval, tsamples, NULL) != SWITCH_STATUS_SUCCESS)
         {
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-                              "Timer Setup Failed. Cannot Start Write Thread\n");
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Timer Setup Failed. Cannot Start Write Thread\n");
+            switch_core_codec_destroy(&write_codec);
             return NULL;
         }
 
@@ -1033,6 +1045,11 @@ extern "C"
             switch_mutex_lock(tech_pvt->mutex);
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) stream_session_cleanup\n", sessionId);
 
+            tech_pvt->close_requested = 1;
+
+            switch_thread_t *write_thread = tech_pvt->write_thread;
+            tech_pvt->write_thread = nullptr;
+
             switch_channel_set_private(channel, MY_BUG_NAME, nullptr);
             if (!channelIsClosing)
             {
@@ -1046,6 +1063,18 @@ extern "C"
                 if (text)
                     audioStreamer->writeText(text);
                 finish(tech_pvt);
+            }
+
+            switch_mutex_unlock(tech_pvt->mutex);
+
+            if (write_thread)
+            {
+                switch_status_t thread_status = SWITCH_STATUS_SUCCESS;
+                switch_status_t join_result = switch_thread_join(&thread_status, write_thread);
+                if (join_result != SWITCH_STATUS_SUCCESS)
+                {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "(%s) stream_session_cleanup: failed to join write thread (%d)\n", sessionId, join_result);
+                }
             }
 
             destroy_tech_pvt(tech_pvt);
