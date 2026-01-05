@@ -1,0 +1,73 @@
+services:
+  sipproxy:
+    image: sipproxy:mod_audio_stream
+    environment:
+      SIP_IP_ADDR: ${SIP_IP_ADDR:?SIP_IP_ADDR is required}
+    command:
+      - /bin/bash
+      - /etc/kamailio/start.sh
+    ports:
+      - "8001:8000"
+      - "4060:4060"
+      - "5060:5060/udp"
+      - "5060:5060/tcp"
+      - "10000-10100:10000-10100/udp"
+    build:
+      context: ..
+      dockerfile: docker/sipproxy/Dockerfile
+      platforms:
+        - linux/amd64
+    networks:
+      sip:
+        ipv4_address: 10.25.0.2
+
+  sipmedia:
+    image: sipmedia:mod_audio_stream
+    privileged: true
+    tty: true
+    stdin_open: true
+    environment:
+      SIPPROXY1: "10.25.0.2"
+    volumes:
+      - ./:/mod_audio_stream
+      - ./sipmedia/etc/freeswitch/scripts:/etc/freeswitch/scripts
+    ports:
+      - "8021:8021"
+    ulimits:
+      core: -1
+    command:
+      - freeswitch
+      - -nonat
+    build:
+      context: ..
+      dockerfile: docker/sipmedia/Dockerfile
+      platforms:
+        - linux/amd64
+        - linux/arm64
+      args:
+        FREESWITCH_APT_LOGIN: ${FREESWITCH_APT_LOGIN:?FREESWITCH_APT_LOGIN is required}
+        FREESWITCH_APT_PASSWORD: ${FREESWITCH_APT_PASSWORD:?FREESWITCH_APT_PASSWORD is required}
+    networks:
+      sip:
+        ipv4_address: 10.25.0.3
+
+  echo:
+    image: echo:latest
+    ports:
+      - "8080:8080"
+    build:
+      context: ..
+      dockerfile: docker/echo/Dockerfile
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    networks:
+      sip:
+        ipv4_address: 10.25.0.4
+
+networks:
+  sip:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.25.0.0/16

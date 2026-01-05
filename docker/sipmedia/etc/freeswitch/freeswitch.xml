@@ -1,0 +1,217 @@
+<document type="freeswitch/xml">
+  <X-PRE-PROCESS cmd="include" data="vars.xml" />
+  <section name="configuration" description="Various Configuration">
+    <configuration name="modules.conf" description="Modules">
+      <modules>
+        <load module="mod_console" />
+        <load module="mod_event_socket" />
+        <load module="mod_sofia" />
+        <load module="mod_commands" />
+        <load module="mod_db" />
+        <load module="mod_dptools" />
+        <load module="mod_hash" />
+        <load module="mod_dialplan_xml" />
+        <load module="mod_sndfile" />
+        <load module="mod_native_file" />
+        <load module="mod_tone_stream" />
+        <load module="mod_say_en" />
+        <load module="mod_distributor" />
+        <load module="mod_lua" />
+        <load module="mod_avmd" />
+        <load module="mod_httapi" />
+        <load module="mod_audio_stream" />
+      </modules>
+    </configuration>
+    <configuration name="switch.conf" description="Core Configuration">
+      <cli-keybindings>
+      </cli-keybindings>
+      <default-ptimes>
+      </default-ptimes>
+      <settings>
+        <param name="colorize-console" value="true" />
+        <param name="dialplan-timestamps" value="false" />
+        <param name="max-db-handles" value="50" />
+        <param name="db-handle-timeout" value="10" />
+        <param name="max-sessions" value="1000" />
+        <param name="sessions-per-second" value="30" />
+        <param name="loglevel" value="debug" />
+        <param name="mailer-app" value="sendmail" />
+        <param name="mailer-app-args" value="-t" />
+        <param name="dump-cores" value="yes" />
+        <param name="rtp-enable-zrtp" value="false" />
+        <param name="rtp-start-port" value="10000" />
+        <param name="rtp-end-port" value="50000" />
+      </settings>
+    </configuration>
+    <configuration name="console.conf" description="Console Logger">
+      <mappings>
+        <map name="all" value="console,debug,info,notice,warning,err,crit,alert" />
+      </mappings>
+      <settings>
+        <param name="colorize" value="true" />
+        <param name="loglevel" value="debug"/>
+      </settings>
+    </configuration>
+    <configuration name="db.conf" description="LIMIT DB Configuration">
+      <settings>
+      </settings>
+    </configuration>
+    <configuration name="acl.conf" description="Network Lists">
+      <network-lists>
+        <list name="internal" default="deny">
+          <node type="allow" cidr="10.0.0.0/8" />
+        </list>
+      </network-lists>
+    </configuration>
+    <configuration name="python.conf" description="Python Configuration">
+      <settings>
+        <param name="startup-script" value="$${python_startup_script}"/>
+      </settings>
+    </configuration>
+    <configuration name="event_socket.conf" description="Socket Client">
+      <settings>
+        <param name="nat-map" value="false" />
+        <param name="listen-ip" value="0.0.0.0" />
+        <param name="listen-port" value="8021" />
+        <param name="password" value="$${default_password}" />
+        <param name="apply-inbound-acl" value="0.0.0.0/0" />
+        <param name="stop-on-bind-error" value="false" />
+      </settings>
+    </configuration>
+    <configuration name="distributor.conf" description="Distributor Configuration">
+      <lists>
+        <list name="sipproxy">
+          <node name="$${sipproxy1}" weight="1"/>
+        </list>
+      </lists>
+    </configuration>
+    <configuration name="lua.conf" description="LUA Configuration">
+      <settings>
+      </settings>
+    </configuration>
+    <configuration name="httapi.conf" description="HT-TAPI Hypertext Telephony API">
+      <settings>
+        <param name="debug" value="true"/>
+        <param name="file-not-found-expires" value="300"/>
+        <param name="file-cache-ttl" value="300"/>
+      </settings>
+      <profiles>
+        <profile name="default">
+          <params>
+            <param name="gateway-url" value="http://www.freeswitch.org/api/index.cgi" />
+          </params>
+        </profile>
+      </profiles>
+    </configuration>
+    <configuration name="avmd.conf" description="AVMD Config - Optimized for Beep Detection Accuracy">
+      <settings>
+          <param name="debug" value="0"/>
+          <param name="report_status" value="1"/>
+          <param name="fast_math" value="0"/>
+          <param name="require_continuous_streak" value="0"/>
+          <param name="sample_n_continuous_streak" value="1"/>
+          <param name="sample_n_to_skip" value="0"/>
+          <param name="require_continuous_streak_amp" value="0"/>
+          <param name="sample_n_continuous_streak_amp" value="1"/>
+          <param name="simplified_estimation" value="0"/>
+          <param name="inbound_channel" value="0"/>
+          <param name="outbound_channel" value="1"/>
+          <param name="detection_mode" value="2"/>
+          <param name="detectors_n" value="45"/>
+          <param name="detectors_lagged_n" value="0"/>
+      </settings>
+    </configuration>
+    <configuration name="sofia.conf" description="sofia Endpoint">
+      <global_settings>
+        <param name="log-level" value="1" />
+        <param name="tracelevel" value="NOTICE"/>
+        <param name="auto-restart" value="false" />
+        <param name="debug-presence" value="0" />
+      </global_settings>
+      <profiles>
+        <profile name="internal">
+          <aliases>
+          </aliases>
+          <gateways>
+          </gateways>
+          <domains>
+            <domain name="all" alias="true" parse="false" />
+          </domains>
+          <settings>
+            <param name="sip-ip" value="$${local_ip_v4}" />
+            <param name="rtp-ip" value="$${local_ip_v4}" />
+            <param name="sip-port" value="5060" />
+            <param name="session-timeout" value="600" />
+            <param name="enable-timer" value="true" />
+            <param name="debug" value="0" />
+            <param name="sip-trace" value="yes" />
+            <param name="sip-capture" value="no" />
+            <param name="log-auth-failures" value="false" />
+            <param name="forward-unsolicited-mwi-notify" value="false" />
+            <param name="context" value="internal" />
+            <param name="rfc2833-pt" value="101" />
+            <param name="dialplan" value="XML" />
+            <param name="dtmf-duration" value="2000" />
+            <param name="inbound-codec-prefs" value="$${global_codec_prefs}" />
+            <param name="outbound-codec-prefs" value="$${global_codec_prefs}" />
+            <param name="rtp-timer-name" value="soft" />
+            <param name="apply-nat-acl" value="nat.auto" />
+            <param name="apply-inbound-acl" value="internal" />
+            <param name="local-network-acl" value="localnet.auto" />
+            <param name="caller-id-type" value="pid" />
+            <param name="manage-presence" value="false" />
+            <param name="inbound-codec-negotiation" value="generous" />
+            <param name="inbound-late-negotiation" value="true" />
+            <param name="inbound-proxy-media" value="false" />
+            <param name="inbound-zrtp-passthru" value="true" />
+            <param name="nonce-ttl" value="60" />
+            <param name="auth-calls" value="true" />
+            <param name="inbound-reg-force-matching-username" value="true" />
+            <param name="auth-all-packets" value="false" />
+            <param name="media_timeout" value="300" />
+            <param name="media_hold_timeout" value="1800" />
+            <param name="challenge-realm" value="auto_from" />
+          </settings>
+        </profile>
+      </profiles>
+    </configuration>
+  </section>
+  <section name="dialplan" description="Regex/XML Dialplan">
+    <context name="internal">
+      <extension name="default">
+        <condition field="destination_number" expression="^(.*)$">
+          <action application="set" data="x_fs_path=${network_addr}" />
+          <action application="set" data="dialed_number=$1" />
+          <action application="lua" data="/etc/freeswitch/scripts/dialplan.lua" />
+        </condition>
+      </extension>
+    </context>
+  </section>
+  <section name="chatplan" description="Regex/XML Chatplan">
+  </section>
+  <section name="directory" description="User Directory">
+    <domain name="$${internal_domain}">
+      <params>
+        <param name="dial-string"
+          value="{^^:sip_invite_domain=${dialed_domain}:presence_id=${dialed_user}@${dialed_domain}}${sofia_contact(*/${dialed_user}@${dialed_domain})},${verto_contact(${dialed_user}@${dialed_domain})}" />
+        <param name="jsonrpc-allowed-methods" value="verto" />
+      </params>
+      <groups>
+        <group name="default">
+          <users>
+            <user id="1000">
+              <params>
+                <param name="password" value="$${default_password}" />
+              </params>
+              <variables>
+                <variable name="user_context" value="default" />
+              </variables>
+            </user>
+          </users>
+        </group>
+      </groups>
+    </domain>
+  </section>
+  <section name="languages" description="Language Management">
+  </section>
+</document>

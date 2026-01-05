@@ -47,40 +47,14 @@ if(CMAKE_BUILD_TYPE MATCHES "Release")
         LINK_FLAGS_RELEASE "-s")
 endif()
 
-set(CPACK_COMPONENTS_ALL ${PROJECT_NAME} changelog.gz copyright)
+set(CPACK_COMPONENTS_ALL ${PROJECT_NAME})
 set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6, libspeexdsp1, openssl, zlib1g, libfreeswitch1")
 set(CPACK_PACKAGE_NAME "mod-audio-stream")
 set(CMAKE_INSTALL_DOCDIR "share/doc/${CPACK_PACKAGE_NAME}")
 
-add_custom_command(
-    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/debian/changelog"
-    COMMAND gzip -cn9 "${CMAKE_CURRENT_SOURCE_DIR}/debian/changelog" > "${CMAKE_CURRENT_BINARY_DIR}/changelog.gz"
-    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/changelog.gz"
-    COMMENT "Processing copyright file"
-)
-add_custom_target(changelog_target ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/changelog.gz")
-
-add_custom_command(
-    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/debian/copyright"
-    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/debian/copyright" "${CMAKE_CURRENT_BINARY_DIR}/copyright"
-    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/copyright"
-    COMMENT "Generating compressed changelog.gz"
-)
-add_custom_target(copyright_target ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/copyright")
-
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/copyright"
-        DESTINATION "${CMAKE_INSTALL_DOCDIR}"
-        COMPONENT copyright
-)
-
 install(TARGETS ${PROJECT_NAME}
         COMPONENT ${PROJECT_NAME}
         DESTINATION ${FS_MOD_DIR})
-
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/changelog.gz"
-	DESTINATION "${CMAKE_INSTALL_DOCDIR}"
-	COMPONENT changelog.gz
-)
 
 message(STATUS "Components to pack: ${CPACK_COMPONENTS_ALL}")
 

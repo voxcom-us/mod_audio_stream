@@ -1,0 +1,47 @@
+<include>
+  <X-PRE-PROCESS cmd="env-set" data="service_name=$SERVICE_NAME"/>
+  <X-PRE-PROCESS cmd="env-set" data="sipproxy1=$SIPPROXY1"/>
+  <X-PRE-PROCESS cmd="set" data="python_startup_script="/>
+> <X-PRE-PROCESS cmd="set" data="internal_domain=internal.local" />
+  <X-PRE-PROCESS cmd="set" data="is_container=true" />
+  <X-PRE-PROCESS cmd="set" data="default_password=ClueCon" />
+  <X-PRE-PROCESS cmd="set" data="global_codec_prefs=OPUS,PCMU" />
+  <X-PRE-PROCESS cmd="set" data="disable_system_api_commands=true" />
+  <X-PRE-PROCESS cmd="set" data="au-ring=%(400,200,383,417);%(400,2000,383,417)" />
+  <X-PRE-PROCESS cmd="set" data="be-ring=%(1000,3000,425)" />
+  <X-PRE-PROCESS cmd="set" data="ca-ring=%(2000,4000,440,480)" />
+  <X-PRE-PROCESS cmd="set" data="cn-ring=%(1000,4000,450)" />
+  <X-PRE-PROCESS cmd="set" data="cy-ring=%(1500,3000,425)" />
+  <X-PRE-PROCESS cmd="set" data="cz-ring=%(1000,4000,425)" />
+  <X-PRE-PROCESS cmd="set" data="de-ring=%(1000,4000,425)" />
+  <X-PRE-PROCESS cmd="set" data="dk-ring=%(1000,4000,425)" />
+  <X-PRE-PROCESS cmd="set" data="dz-ring=%(1500,3500,425)" />
+  <X-PRE-PROCESS cmd="set" data="eg-ring=%(2000,1000,475,375)" />
+  <X-PRE-PROCESS cmd="set" data="es-ring=%(1500,3000,425)" />
+  <X-PRE-PROCESS cmd="set" data="fi-ring=%(1000,4000,425)" />
+  <X-PRE-PROCESS cmd="set" data="fr-ring=%(1500,3500,440)" />
+  <X-PRE-PROCESS cmd="set" data="hk-ring=%(400,200,440,480);%(400,3000,440,480)" />
+  <X-PRE-PROCESS cmd="set" data="hu-ring=%(1250,3750,425)" />
+  <X-PRE-PROCESS cmd="set" data="il-ring=%(1000,3000,400)" />
+  <X-PRE-PROCESS cmd="set" data="in-ring=%(400,200,425,375);%(400,2000,425,375)" />
+  <X-PRE-PROCESS cmd="set" data="jp-ring=%(1000,2000,420,380)" />
+  <X-PRE-PROCESS cmd="set" data="ko-ring=%(1000,2000,440,480)" />
+  <X-PRE-PROCESS cmd="set" data="pk-ring=%(1000,2000,400)" />
+  <X-PRE-PROCESS cmd="set" data="pl-ring=%(1000,4000,425)" />
+  <X-PRE-PROCESS cmd="set" data="ro-ring=%(1850,4150,475,425)" />
+  <X-PRE-PROCESS cmd="set" data="rs-ring=%(1000,4000,425)" />
+  <X-PRE-PROCESS cmd="set" data="ru-ring=%(800,3200,425)" />
+  <X-PRE-PROCESS cmd="set" data="sa-ring=%(1200,4600,425)" />
+  <X-PRE-PROCESS cmd="set" data="tr-ring=%(2000,4000,450)" />
+  <X-PRE-PROCESS cmd="set" data="uk-ring=%(400,200,400,450);%(400,2000,400,450)" />
+  <X-PRE-PROCESS cmd="set" data="us-ring=%(2000,4000,440,480)" />
+  <X-PRE-PROCESS cmd="set" data="bong-ring=v=-7;%(100,0,941.0,1477.0);v=-7;>=2;+=.1;%(1400,0,350,440)" />
+  <X-PRE-PROCESS cmd="set" data="beep=%(1000,0,640)" />
+  <X-PRE-PROCESS cmd="set" data="sit=%(274,0,913.8);%(274,0,1370.6);%(380,0,1776.7)" />
+  <X-PRE-PROCESS cmd="set" data="df_us_ssn=(?!219099999|078051120)(?!666|000|9\d{2})\d{3}(?!00)\d{2}(?!0{4})\d{4}" />
+  <X-PRE-PROCESS cmd="set" data="df_luhn=?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|3(?:0[0-5]|[68][0-9])[0-9]{11}|6(?:011|5[0-9]{2})[0-9]{12}|(?:2131|1800|35\d{3})\d{11}" />
+  <X-PRE-PROCESS cmd="set" data="rtp_video_max_bandwidth_in=3mb" />
+  <X-PRE-PROCESS cmd="set" data="rtp_video_max_bandwidth_out=3mb" />
+  <X-PRE-PROCESS cmd="set" data="suppress_cng=true" />
+  <X-PRE-PROCESS cmd="set" data="rtp_liberal_dtmf=true" />
+</include>
