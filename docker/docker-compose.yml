@@ -17,6 +17,7 @@ services:
       dockerfile: docker/sipproxy/Dockerfile
       platforms:
         - linux/amd64
+        - linux/arm64
     networks:
       sip:
         ipv4_address: 10.25.0.2
@@ -28,22 +29,28 @@ services:
     stdin_open: true
     environment:
       SIPPROXY1: "10.25.0.2"
+      RUN_WITH_GDB: "${RUN_WITH_GDB:-0}"
     volumes:
       - ./:/mod_audio_stream
       - ./sipmedia/etc/freeswitch/scripts:/etc/freeswitch/scripts
+      - ./tmp:/tmp
     ports:
       - "8021:8021"
     ulimits:
       core: -1
     command:
-      - freeswitch
-      - -nonat
+      - /bin/bash
+      - -c
+      - |
+        if [ "$${RUN_WITH_GDB}" = "1" ]; then
+          echo "Running FreeSWITCH under gdb..."
+          /usr/local/bin/run-freeswitch-gdb.sh
+        else
+          freeswitch -nonat
+        fi
     build:
       context: ..
       dockerfile: docker/sipmedia/Dockerfile
-      platforms:
-        - linux/amd64
-        - linux/arm64
       args:
         FREESWITCH_APT_LOGIN: ${FREESWITCH_APT_LOGIN:?FREESWITCH_APT_LOGIN is required}
         FREESWITCH_APT_PASSWORD: ${FREESWITCH_APT_PASSWORD:?FREESWITCH_APT_PASSWORD is required}

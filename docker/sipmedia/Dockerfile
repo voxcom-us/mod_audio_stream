@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.6
-
 FROM debian:bookworm-slim
 
 EXPOSE 8021/tcp
@@ -60,6 +58,7 @@ ADD docker/sipmedia/etc/fs_cli.conf /etc/fs_cli.conf
 ADD docker/sipmedia/etc/freeswitch/vars.xml /etc/freeswitch/vars.xml
 ADD docker/sipmedia/etc/freeswitch/mime.types /etc/freeswitch/mime.types
 ADD docker/sipmedia/etc/freeswitch/freeswitch.xml /etc/freeswitch/freeswitch.xml
+ADD docker/sipmedia/run-freeswitch-gdb.sh /usr/local/bin/run-freeswitch-gdb.sh
 
 COPY . /mod_audio_stream
 RUN cd /mod_audio_stream ; git submodule init ; git submodule update; rm -rf build; mkdir -p build ; cd build ; cmake -DUSE_TLS=ON -DCMAKE_BUILD_TYPE=Release .. ; make install

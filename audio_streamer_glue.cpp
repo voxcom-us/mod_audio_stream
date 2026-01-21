@@ -385,6 +385,8 @@ private:
     ProcessResult processMessage(const std::string& message) {
         ProcessResult out;
 
+        if (isCleanedUp()) return out;
+
         // RAII
         using jsonPtr = std::unique_ptr<cJSON, decltype(&cJSON_Delete)>;
         jsonPtr root(cJSON_Parse(message.c_str()), &cJSON_Delete);
