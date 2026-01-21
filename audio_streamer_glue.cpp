@@ -213,6 +213,12 @@ public:
 
     switch_bool_t processMessage(switch_core_session_t *session, std::string &message)
     {
+        // Check if cleanup has started before accessing any session data
+        if (isCleanedUp())
+        {
+            return SWITCH_FALSE;
+        }
+
         cJSON *json = cJSON_Parse(message.c_str());
         switch_bool_t status = SWITCH_FALSE;
         if (!json)
@@ -285,6 +291,13 @@ public:
                             }
 
                             const size_t bytes_out = out_len * channels * sizeof(spx_int16_t);
+                            // Check again before locking to prevent race condition during cleanup
+                            if (tech_pvt->close_requested)
+                            {
+                                cJSON_Delete(jsonAudio);
+                                cJSON_Delete(json);
+                                return SWITCH_FALSE;
+                            }
                             if (switch_mutex_lock(tech_pvt->write_mutex) == SWITCH_STATUS_SUCCESS)
                             {
                                 size_t remaining = bytes_out;
@@ -429,8 +442,11 @@ public:
     void markCleanedUp()
     {
         m_cleanedUp.store(true, std::memory_order_release);
-        // clear callbacks to prevent dangling calls
+        // clear ALL callbacks to prevent dangling calls during cleanup
         client.setMessageCallback({});
+        client.setOpenCallback({});
+        client.setCloseCallback({});
+        client.setErrorCallback({});
     }
 
     bool isCleanedUp() const
@@ -650,14 +666,15 @@ namespace
 
     void finish(private_t *tech_pvt)
     {
-        std::shared_ptr<AudioStreamer> aStreamer;
-        aStreamer.reset((AudioStreamer *)tech_pvt->pAudioStreamer);
-        tech_pvt->pAudioStreamer = nullptr;
-
-        aStreamer->markCleanedUp();
-        std::thread t([aStreamer]
-                      { aStreamer->disconnect(); });
-        t.detach();
+        auto *audioStreamer = (AudioStreamer *)tech_pvt->pAudioStreamer;
+        if (audioStreamer)
+        {
+            // Mark as cleaned up and clear callbacks FIRST to prevent race conditions
+            audioStreamer->markCleanedUp();
+            // Disconnect synchronously to ensure no callbacks fire during cleanup
+            audioStreamer->disconnect();
+            tech_pvt->pAudioStreamer = nullptr;
+        }
     }
 
 }
