@@ -45,6 +45,14 @@ public:
         client.disconnect();
     }
 
+    /** Barge-in flush: drop all incoming audio until the server sends its
+     *  first non-audio (JSON) message, which signals the old TTS response
+     *  has ended.  Any audio frames that arrive while the flag is set are
+     *  silently discarded in eventCallback before reaching write_sbuffer. */
+    void discardIncomingAudio() {
+        m_discardAudio.store(true, std::memory_order_release);
+    }
+
     bool isConnected() {
         return client.isConnected();
     }
@@ -373,6 +381,11 @@ private:
 
             case MESSAGE:
                 if (pr.isRawAudio) {
+                    if (m_discardAudio.load(std::memory_order_acquire)) {
+                        // Barge-in flush active: silently drop audio that
+                        // belonged to the interrupted response.
+                        break;
+                    }
                     /* Guard against injecting audio on a dying channel.
                        switch_channel_ready() returns false once hangup begins,
                        so we avoid entering injectRawAudio when write_frame_thread
@@ -383,11 +396,16 @@ private:
                             injectRawAudio(psession, pr.rawAudio, pr.sampleRate);
                         }
                     }
-                } else if (pr.ok == SWITCH_TRUE) {
-                    m_notify(psession, EVENT_PLAY, msg.c_str());
                 } else {
-                    // fall back to EVENT_JSON
-                    m_notify(psession, EVENT_JSON, msg.c_str());
+                    // Any non-audio message from the server means the old TTS
+                    // response has ended; re-enable audio injection.
+                    m_discardAudio.store(false, std::memory_order_release);
+                    if (pr.ok == SWITCH_TRUE) {
+                        m_notify(psession, EVENT_PLAY, msg.c_str());
+                    } else {
+                        // fall back to EVENT_JSON
+                        m_notify(psession, EVENT_JSON, msg.c_str());
+                    }
                 }
 
                 if (!m_suppress_log && !pr.isRawAudio) {
@@ -545,6 +563,9 @@ private:
     std::unordered_set<std::string> m_Files;
     std::atomic<bool> m_cleanedUp{false};
     std::mutex m_stateMutex;
+    // Barge-in: drop incoming raw audio until the server sends a non-audio
+    // message (which signals the old TTS response has ended).
+    std::atomic<bool> m_discardAudio{false};
 };
 
 
@@ -871,11 +892,31 @@ extern "C" {
         auto *tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
         if (!tech_pvt) return SWITCH_STATUS_FALSE;
 
+        // 1. Zero the write buffer (audio already decoded and waiting to play).
         switch_mutex_lock(tech_pvt->write_mutex);
         switch_buffer_zero(tech_pvt->write_sbuffer);
         switch_mutex_unlock(tech_pvt->write_mutex);
 
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "stream_session_flush: write buffer cleared\n");
+        // 2. Discard audio still in transit from the WebSocket:
+        //    - signals the event thread to drain the input evbuffer
+        //      (TCP bytes received but not yet parsed)
+        //    - sets a discard flag that silently drops any raw audio frames
+        //      arriving after this point until the server sends a non-audio
+        //      message (indicating the interrupted response has ended).
+        std::shared_ptr<AudioStreamer> streamer;
+        switch_mutex_lock(tech_pvt->mutex);
+        if (tech_pvt->pAudioStreamer) {
+            auto* sp_wrap = static_cast<std::shared_ptr<AudioStreamer>*>(tech_pvt->pAudioStreamer);
+            if (sp_wrap && *sp_wrap) streamer = *sp_wrap;
+        }
+        switch_mutex_unlock(tech_pvt->mutex);
+
+        if (streamer) {
+            streamer->discardIncomingAudio();
+        }
+
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                          "stream_session_flush: write buffer cleared, incoming audio discarded\n");
         return SWITCH_STATUS_SUCCESS;
     }
 
