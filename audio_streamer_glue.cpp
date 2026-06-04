@@ -893,9 +893,10 @@ extern "C" {
         if (!tech_pvt) return SWITCH_STATUS_FALSE;
 
         // 1. Zero the write buffer (audio already decoded and waiting to play).
-        switch_mutex_lock(tech_pvt->write_mutex);
-        switch_buffer_zero(tech_pvt->write_sbuffer);
-        switch_mutex_unlock(tech_pvt->write_mutex);
+        // Commenting out for a moment
+        // switch_mutex_lock(tech_pvt->write_mutex);
+        // switch_buffer_zero(tech_pvt->write_sbuffer);
+        // switch_mutex_unlock(tech_pvt->write_mutex);
 
         // 2. Discard audio still in transit from the WebSocket:
         //    - signals the event thread to drain the input evbuffer
