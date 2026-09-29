@@ -4,100 +4,63 @@
 
 Streams real-time audio between FreeSWITCH and external systems with correct lifecycle management, thread safety and predictable memory usage.
 
-### 🚀 Major Release: Bi-Directional Streaming with Automatic Playback v1.1.0
+***This module supports bi-directional audio streaming (see python example below).***
 
-**mod_audio_stream v1.1.0** introduces major improvements to stream lifecycle,
-playback reliability, session safety, and stability under concurrent production workloads.
+## About
 
-It is available from the [Releases](https://github.com/amigniter/mod_audio_stream/releases) section as pre-built [DEB](https://github.com/amigniter/mod_audio_stream/releases/download/v1.1.0/mod-audio-stream_1.1.0_amd64.deb) and [RPM](https://github.com/amigniter/mod_audio_stream/releases/download/v1.1.0/mod-audio-stream-1.1.0-1.el9.x86_64.rpm) packages (**Debian 13** and **Rocky Linux 9**).
-
-Key improvements in **v1.1.0**:
-
-* Major stream lifecycle and thread-safe cleanup improvements
-* Improved handling of concurrent start, stop, pause, and channel teardown operations
-* Improved recovery after WebSocket connection and startup failures
-* Improved playback integration with the standard FreeSWITCH media pipeline
-* Native **`uuid_record`** support for recording caller audio and returned WebSocket audio in a single unified recording
-* Improved audio pipeline, resampling, and playback handling
-* Improved RAW binary streaming validation and safeguards
-* Improved stability and resource management under concurrent workloads
-* Updated playback and RAW binary streaming documentation
-
-The Bi-Directional edition provides full-duplex audio streaming between the caller and WebSocket endpoint and supports **base64-encoded and raw binary audio**, multiple returned audio formats including **PCMU, PCMA, L16/RAW, and Opus**, automatic resampling, and dynamic playback control.
-
-> **Named Pipe Audio Output** can expose return/playback audio through a local named pipe (FIFO) as raw PCM16 audio in real time. The output sample rate can follow the FreeSWITCH channel rate or be independently resampled to 8, 16, 24, 32, or 48 kHz. This allows external applications to consume the audio directly for recording, monitoring, DSP, analytics, transcoding, or integration with other local audio pipelines — __without interfering with normal caller playback__.
-
-Connect the live return audio directly to tools such as FFmpeg, aplay, or any local audio processing pipeline:
-```text
-uuid_audio_stream <uuid> pipe start /tmp/audio.pipe 16000
-```
-
-```bash
-ffmpeg -f s16le -ar 16000 -ac 1 -i /tmp/audio.pipe ...
-```
-
-🔹 The pre-built release is available for **free use, including commercial use**, with a limit of **10 concurrent streaming channels**.
-
-For deployments requiring more than 10 concurrent channels, source-code licensing, or an unlimited evaluation build, please [contact us](mailto:amsoftswitch@gmail.com).
-
-A **30-day evaluation version with no channel limitation** is also available for load, stability, and integration testing.
-
-See **README.playback.md** for playback API, audio formats, and configuration details.
-
-#### Why the Commercial Edition Exists
-
-The Community Edition of `mod_audio_stream` provides lightweight, production-ready **uni-directional** WebSocket audio streaming and is well suited for ASR, transcription, analytics, and other real-time audio processing use cases.
-
-Bi-directional telephony introduces additional challenges that become particularly important under concurrent production workloads: safe audio injection, playback timing, codec conversion and resampling, session lifecycle synchronization, concurrent API operations, channel teardown, and predictable resource usage.
-
-The commercial edition addresses these requirements with a dedicated playback and audio-processing pipeline, thread-safe lifecycle management, and extensive stability and load testing. It is intended for production systems where continuous full-duplex audio, predictable behavior, and reliable operation under high concurrency are required.
-
-
-### About
-
-- The purpose of `mod_audio_stream` is to provide a simple, low-dependency yet effective module for streaming audio and receiving responses from a websocket server.
-- Introduced [libwsc](https://github.com/amigniter/libwsc), our in-house, **RFC-6455 compliant** websocket client developed specifically for `mod_audio_stream`.
-  - Replaces [ixwebsocket](https://machinezone.github.io/IXWebSocket/), which served us well for the past few years. `libwsc` is libevent-based, extremely lightweight, and optimized for low-latency audio streaming.
-- This module was inspired by mod_audio_fork.
+- The purpose of `mod_audio_stream` was to provide a simple, low-dependency yet effective module for streaming audio and receiving responses from a websocket server.
 
 ## Installation
 
 ### Dependencies
+
 It requires `libfreeswitch-dev`, `libssl-dev`, `zlib1g-dev`, `libevent-dev` and `libspeexdsp-dev` on Debian/Ubuntu which are regular packages for Freeswitch installation.
+
 ### Building
+
 After cloning please execute: **git submodule init** and **git submodule update** to initialize the submodule.
+
 #### Custom path
+
 If you built FreeSWITCH from source, eq. install dir is /usr/local/freeswitch, add path to pkgconfig:
-```
+
+```shell
 export PKG_CONFIG_PATH=/usr/local/freeswitch/lib/pkgconfig
 ```
+
 To build the module, from the cloned repository:
-```
+
+```shell
 mkdir build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
 make
 sudo make install
 ```
+
 **TLS** is `OFF` by default. To build with TLS support add `-DUSE_TLS=ON` to cmake line.
 
 #### DEB Package
+
 To build DEB package after making the module:
-```
+
+```shell
 cpack -G DEB
 ```
+
 Debian package will be placed in root directory `_packages` folder.
 
 ## Scripted Build & Installation
 
-```
+```shell
 sudo apt-get -y install git \
     && cd /usr/src/ \
-    && git clone https://github.com/amigniter/mod_audio_stream.git \
+    && git clone https://github.com/voxcom-us/mod_audio_stream.git \
     && cd mod_audio_stream \
     && sudo bash ./build-mod-audio-stream.sh
 ```
 
 ### Channel variables
+
 The following channel variables can be used to fine tune websocket connection and also configure mod_audio_stream logging:
 
 | Variable                               | Description                                             | Default |
@@ -119,6 +82,7 @@ The following channel variables can be used to fine tune websocket connection an
 - `Buffer Size` actually represents a duration of audio chunk sent to websocket. If you want to send e.g. 100ms audio packets to your ws endpoint
 you would set this variable to 100. If ommited, default packet size of 20ms will be sent as grabbed from the audio channel (which is default FreeSWITCH frame size)
 - Extra headers should be a JSON object with key-value pairs representing additional HTTP headers. Each key should be a header name, and its corresponding value should be a string.
+
   ```json
   {
       "Header1": "Value1",
@@ -126,6 +90,7 @@ you would set this variable to 100. If ommited, default packet size of 20ms will
       "Header3": "Value3"
   }
 - ~~Websocket automatic reconnection is on by default. To disable it set this channel variable to true or 1.~~
+
   - libwsc does not support automatic reconnection.
 - TLS (for WSS) options can be fine tuned with the `STREAM_TLS_*` channel variables:
   - `STREAM_TLS_CA_FILE` the ca certificate (or certificate bundle) file. By default is `SYSTEM` which means use the system defaults.
@@ -138,15 +103,18 @@ Defaults to `false`, which enforces hostname match with the peer certificate.
 ## API
 
 ### Commands
+
 The freeswitch module exposes the following API commands:
 
-```
+```shell
 uuid_audio_stream <uuid> start <wss-url> <mix-type> <sampling-rate> <metadata>
 ```
+
 Attaches a media bug and starts streaming audio (in L16 format) to the websocket server. FS default is 8k. If sampling-rate is other than 8k it will be resampled.
+
 - `uuid` - Freeswitch channel unique id
 - `wss-url` - websocket url `ws://` or `wss://`
-- `mix-type` - choice of 
+- `mix-type` - choice of
   - "mono" - single channel containing caller's audio
   - "mixed" - single channel containing both caller and callee audio
   - "stereo" - two channels with caller audio in one and callee audio in the other.
@@ -155,28 +123,40 @@ Attaches a media bug and starts streaming audio (in L16 format) to the websocket
   - "16k" = 16000 Hz sample rate will be generated
 - `metadata` - (optional) a valid `utf-8` text to send. It will be sent the first before audio streaming starts.
 
-```
+```shell
 uuid_audio_stream <uuid> send_text <metadata>
 ```
+
 Sends a text to the websocket server. Requires a valid `utf-8` text.
 
-```
+```shell
 uuid_audio_stream <uuid> stop <metadata>
 ```
-Stops audio stream and closes websocket connection. If _metadata_ is provided it will be sent before the connection is closed.
 
-```
+Stops audio stream and closes websocket connection. If _metadata* is provided it will be sent before the connection is closed.
+
+```shell
 uuid_audio_stream <uuid> pause
 ```
+
 Pauses audio stream
 
-```
+```shell
 uuid_audio_stream <uuid> resume
 ```
+
 Resumes audio stream
 
+```shell
+uuid_audio_stream <uuid> flush
+```
+
+Barge-in. Discards audio the websocket server is still sending for the current response: raw `streamAudio` messages are dropped until the server sends its next non-audio message, which marks the end of the interrupted response.
+
 ## Events
+
 Module will generate the following event types:
+
 - `mod_audio_stream::json`
 - `mod_audio_stream::connect`
 - `mod_audio_stream::disconnect`
@@ -184,53 +164,70 @@ Module will generate the following event types:
 - `mod_audio_stream::play`
 
 ### response
+
 Message received from websocket endpoint. Json expected, but it contains whatever the websocket server's response is.
+
 #### Freeswitch event generated
+
 **Name**: mod_audio_stream::json
 **Body**: WebSocket server response
 
 ### connect
+
 Successfully connected to websocket server.
+
 #### Freeswitch event generated
+
 **Name**: mod_audio_stream::connect
 **Body**: JSON
+
 ```json
 {
-	"status": "connected"
+ "status": "connected"
 }
 ```
 
 ### disconnect
+
 Disconnected from websocket server.
+
 #### Freeswitch event generated
+
 **Name**: mod_audio_stream::disconnect
 **Body**: JSON
+
 ```json
 {
-	"status": "disconnected",
-	"message": {
-		"code": 1000,
-		"reason": "Normal closure"
-	}
+ "status": "disconnected",
+ "message": {
+  "code": 1000,
+  "reason": "Normal closure"
+ }
 }
 ```
+
 - code: `<int>`
 - reason: `<string>`
 
 ### error
+
 There is an error with the connection. Multiple fields will be available on the event to describe the error.
+
 #### Freeswitch event generated
+
 **Name**: mod_audio_stream::error
 **Body**: JSON
+
 ```json
 {
-	"status": "error",
-	"message": {
-		"code": 1,
-		"error": "String explaining the error"
-	}
+ "status": "error",
+ "message": {
+  "code": 1,
+  "error": "String explaining the error"
+ }
 }
 ```
+
 - code: `<int>`
 - error: `<string>`
 
@@ -250,12 +247,13 @@ There is an error with the connection. Multiple fields will be available on the 
 | 10   | `TIMEOUT`             | Timeout                                              |
 | 11   | `PROTOCOL`            | WebSocket protocol error                             |
 
-
 ### play
+
 **Name**: mod_audio_stream::play
 **Body**: JSON
 
 Websocket server may return JSON object containing base64 encoded audio to be played by the user. To use this feature, response must follow the format:
+
 ```json
 {
   "type": "streamAudio",
@@ -266,9 +264,11 @@ Websocket server may return JSON object containing base64 encoded audio to be pl
   }
 }
 ```
+
 - audioDataType: `<raw|wav|mp3|ogg>`
 
 Event generated by the module (subclass: _mod_audio_stream::play_) will be the same as the `data` element with the **file** added to it representing filePath:
+
 ```json
 {
   "audioDataType": "raw",
@@ -276,13 +276,11 @@ Event generated by the module (subclass: _mod_audio_stream::play_) will be the s
   "file": "/path/to/the/file"
 }
 ```
+
 If printing to the log is not suppressed, `response` printed to the console will look the same as the event. The original response containing base64 encoded audio is replaced because it can be quite huge.
 
 All the files generated by this feature will reside at the temp directory and will be deleted when the session is closed.
 
-### Ownership
+## Example
 
-Both the public and commercial editions of **mod_audio_stream** are developed entirely and owned by **AMSOFTSWITCH LTD**.
-
-The mod_audio_stream source code contains no third-party source code or bundled third-party dependencies.
-It relies only on external system and FreeSWITCH libraries, which remain subject to their respective licenses.
+See `docker/README.md` for complete working setup for testing bi-directional audio.

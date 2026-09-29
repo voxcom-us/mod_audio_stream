@@ -10,6 +10,8 @@
 #include <vector>
 #include <memory>
 #include <mutex>
+#include <thread>
+#include <algorithm>
 #include "base64.h"
 
 #define FRAME_SIZE_8000  320 /* 1000x0.02 (20ms)= 160 x(16bit= 2 bytes) 320 frame size*/
@@ -19,12 +21,12 @@ public:
     // Factory
     static std::shared_ptr<AudioStreamer> create(
         const char* uuid, const char* wsUri, const char* metadata, responseHandler_t callback, int deflate, int heart_beat,
-        bool suppressLog, const char* extra_headers, const char* tls_cafile, const char* tls_keyfile, 
+        bool suppressLog, const char* extra_headers, const char* tls_cafile, const char* tls_keyfile,
         const char* tls_certfile, bool tls_disable_hostname_validation) {
 
         std::shared_ptr<AudioStreamer> sp(new AudioStreamer(
             uuid, wsUri, metadata, callback, deflate, heart_beat,
-            suppressLog, extra_headers, tls_cafile, tls_keyfile, 
+            suppressLog, extra_headers, tls_cafile, tls_keyfile,
             tls_certfile, tls_disable_hostname_validation
         ));
 
@@ -40,6 +42,12 @@ public:
     void disconnect() {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "disconnecting...\n");
         client.disconnect();
+    }
+
+    /* Barge-in flush: drop incoming raw audio until the server's next non-audio
+       message, which marks the end of the interrupted response. See .docs/lifecycle.md. */
+    void discardIncomingAudio() {
+        m_discardAudio.store(true, std::memory_order_release);
     }
 
     bool isConnected() {
@@ -92,7 +100,7 @@ private:
     // Ctor
     AudioStreamer(
         const char* uuid, const char* wsUri, const char* metadata, responseHandler_t callback, int deflate, int heart_beat,
-        bool suppressLog, const char* extra_headers, const char* tls_cafile, const char* tls_keyfile, 
+        bool suppressLog, const char* extra_headers, const char* tls_cafile, const char* tls_keyfile,
         const char* tls_certfile, bool tls_disable_hostname_validation
     ) : m_sessionId(uuid), m_initialMetadata(metadata ? metadata : ""), m_notify(callback), m_suppress_log(suppressLog),
         m_extra_headers(extra_headers), m_playFile(0) {
@@ -152,6 +160,9 @@ private:
         switch_bool_t ok = SWITCH_FALSE;
         std::string rewrittenJsonData;
         std::vector<std::string> errors;
+        bool isRawAudio = false;
+        int sampleRate = 0;
+        std::vector<uint8_t> rawAudio;
     };
 
     static inline void push_err(ProcessResult& out, const std::string& sid, const std::string& s) {
@@ -229,12 +240,7 @@ private:
             return;
         }
 
-        auto *ctx =
-            (stream_context_t *)switch_channel_get_private(
-                channel,
-                MY_STREAM_CONTEXT
-            );
-
+        auto *ctx = (stream_context_t *)switch_channel_get_private(channel, MY_STREAM_CONTEXT);
         if (!ctx) {
             return;
         }
@@ -255,8 +261,7 @@ private:
 
             bug = ctx->bug;
 
-            auto *tech_pvt =
-                (private_t *)switch_core_media_bug_get_user_data(bug);
+            auto *tech_pvt = (private_t *)switch_core_media_bug_get_user_data(bug);
 
             if (tech_pvt) {
                 __atomic_store_n(&tech_pvt->close_requested, 1, __ATOMIC_RELAXED);
@@ -272,15 +277,99 @@ private:
 
     inline void send_initial_metadata() {
         if (!m_initialMetadata.empty()) {
-            switch_log_printf(
-                SWITCH_CHANNEL_LOG,
-                SWITCH_LOG_DEBUG,
-                "sending initial metadata %s\n",
-                m_initialMetadata.c_str()
-            );
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+                              "sending initial metadata %s\n", m_initialMetadata.c_str());
 
             writeText(m_initialMetadata.c_str());
         }
+    }
+
+    /* tech_pvt of the running stream, or nullptr. It is session-pool allocated, so the
+       pointer outlives ctx->mutex; close_requested / cleanup_started say if it is usable. */
+    private_t *lookup_tech_pvt(switch_core_session_t *session) {
+        switch_channel_t *channel = switch_core_session_get_channel(session);
+        if (!channel) return nullptr;
+
+        auto *ctx = (stream_context_t *)switch_channel_get_private(channel, MY_STREAM_CONTEXT);
+        if (!ctx) return nullptr;
+
+        private_t *tech_pvt = nullptr;
+        switch_mutex_lock(ctx->mutex);
+        if (ctx->bug && (ctx->state == STREAM_STATE_ACTIVE || ctx->state == STREAM_STATE_PAUSED)) {
+            tech_pvt = (private_t *)switch_core_media_bug_get_user_data(ctx->bug);
+        }
+        switch_mutex_unlock(ctx->mutex);
+        return tech_pvt;
+    }
+
+    void injectRawAudio(switch_core_session_t *session, const std::vector<uint8_t>& rawAudio, int sampleRate) {
+        private_t *tech_pvt = lookup_tech_pvt(session);
+        if (!tech_pvt || !tech_pvt->write_sbuffer) return;
+        if (__atomic_load_n(&tech_pvt->close_requested, __ATOMIC_RELAXED)) return;
+
+        const int outRate = tech_pvt->sampling;
+        const int channels = tech_pvt->channels;
+        const int inRate = sampleRate ? sampleRate : tech_pvt->wsSampling;
+
+        if (rawAudio.empty() || channels <= 0) return;
+
+        spx_uint32_t in_frames = (spx_uint32_t)(rawAudio.size() / (sizeof(spx_int16_t) * channels));
+        if (in_frames == 0) return;
+
+        spx_uint32_t max_out = (spx_uint32_t)((double)in_frames * outRate / inRate) + 1;
+        std::vector<spx_int16_t> in_buf(in_frames * channels);
+        std::vector<spx_int16_t> out_buf(max_out * channels);
+        std::memcpy(in_buf.data(), rawAudio.data(), rawAudio.size());
+
+        spx_uint32_t in_len = in_frames;
+        spx_uint32_t out_len = max_out;
+
+        if (inRate == outRate || !tech_pvt->write_resampler) {
+            // no resample needed - copy through
+            out_buf.assign(in_buf.begin(), in_buf.end());
+            out_len = in_len;
+        } else if (channels == 1) {
+            speex_resampler_process_int(tech_pvt->write_resampler, 0,
+                                        in_buf.data(), &in_len,
+                                        out_buf.data(), &out_len);
+        } else {
+            speex_resampler_process_interleaved_int(tech_pvt->write_resampler,
+                                                    in_buf.data(), &in_len,
+                                                    out_buf.data(), &out_len);
+        }
+
+        const size_t bytes_out = (size_t)out_len * (size_t)channels * sizeof(spx_int16_t);
+
+        if (switch_mutex_lock(tech_pvt->write_mutex) != SWITCH_STATUS_SUCCESS) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                              "%s injectRawAudio: write mutex lock failed, dropping %zu bytes\n",
+                              tech_pvt->sessionId, bytes_out);
+            return;
+        }
+
+        size_t remaining = bytes_out;
+        const uint8_t *ptr = reinterpret_cast<const uint8_t *>(out_buf.data());
+        while (remaining > 0) {
+            /* Never spin here once teardown starts: we hold the session read lock
+               (from eventCallback), and nothing is draining write_sbuffer any more. */
+            if (__atomic_load_n(&tech_pvt->close_requested, __ATOMIC_RELAXED) ||
+                __atomic_load_n(&tech_pvt->cleanup_started, __ATOMIC_RELAXED)) {
+                break;
+            }
+            switch_size_t free_space = switch_buffer_freespace(tech_pvt->write_sbuffer);
+            if (free_space == 0) {
+                switch_mutex_unlock(tech_pvt->write_mutex);
+                switch_yield(10000);
+                if (switch_mutex_lock(tech_pvt->write_mutex) != SWITCH_STATUS_SUCCESS) return;
+                continue;
+            }
+            size_t chunk = std::min<size_t>(remaining, free_space);
+            switch_buffer_write(tech_pvt->write_sbuffer, ptr, chunk);
+            ptr += chunk;
+            remaining -= chunk;
+        }
+
+        switch_mutex_unlock(tech_pvt->write_mutex);
     }
 
     void eventCallback(notifyEvent_t event, const char* message) {
@@ -324,14 +413,32 @@ private:
                 break;
 
             case MESSAGE:
-                if (pr.ok == SWITCH_TRUE) {
-                    m_notify(psession, EVENT_PLAY, msg.c_str());
+                if (pr.isRawAudio) {
+                    if (m_discardAudio.load(std::memory_order_acquire)) {
+                        // Barge-in flush active: silently drop audio that
+                        // belonged to the interrupted response.
+                        break;
+                    }
+                    /* Don't inject into a dying channel - nothing drains it. */
+                    {
+                        switch_channel_t *ch = switch_core_session_get_channel(psession);
+                        if (ch && switch_channel_ready(ch)) {
+                            injectRawAudio(psession, pr.rawAudio, pr.sampleRate);
+                        }
+                    }
                 } else {
-                    // fall back to EVENT_JSON
-                    m_notify(psession, EVENT_JSON, msg.c_str());
+                    // Any non-audio message from the server means the old TTS
+                    // response has ended; re-enable audio injection.
+                    m_discardAudio.store(false, std::memory_order_release);
+                    if (pr.ok == SWITCH_TRUE) {
+                        m_notify(psession, EVENT_PLAY, msg.c_str());
+                    } else {
+                        // fall back to EVENT_JSON
+                        m_notify(psession, EVENT_JSON, msg.c_str());
+                    }
                 }
 
-                if (!m_suppress_log) {
+                if (!m_suppress_log && !pr.isRawAudio) {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
                                     "response: %s\n", msg.c_str());
                 }
@@ -344,6 +451,8 @@ private:
 
     ProcessResult processMessage(const std::string& message) {
         ProcessResult out;
+
+        if (isCleanedUp()) return out;
 
         // RAII
         using jsonPtr = std::unique_ptr<cJSON, decltype(&cJSON_Delete)>;
@@ -382,16 +491,19 @@ private:
             sampleRate = jsonSampleRate->valueint;
         }
 
-        // map file type
+        const bool isRaw = std::strcmp(jsAudioDataType, "raw") == 0;
+
+        // map file type (raw is handled out-of-band via write buffer; see eventCallback)
         std::string fileType;
-        if (std::strcmp(jsAudioDataType, "raw") == 0) {
+        if (isRaw) {
             switch (sampleRate) {
-                case 8000:  fileType = ".r8";  break;
-                case 16000: fileType = ".r16"; break;
-                case 24000: fileType = ".r24"; break;
-                case 32000: fileType = ".r32"; break;
-                case 48000: fileType = ".r48"; break;
-                case 64000: fileType = ".r64"; break;
+                case 8000:
+                case 16000:
+                case 24000:
+                case 32000:
+                case 48000:
+                case 64000:
+                    break;
                 default:
                     push_err(out, m_sessionId, "processMessage - unsupported sample rate: " + std::to_string(sampleRate));
                     return out;
@@ -412,6 +524,15 @@ private:
             decoded = base64_decode(jsonAudio->valuestring);
         } catch (const std::exception& e) {
             push_err(out, m_sessionId, "processMessage - base64 decode error: " + std::string(e.what()));
+            return out;
+        }
+
+        if (isRaw) {
+            out.isRawAudio = true;
+            out.sampleRate = sampleRate;
+            out.rawAudio.assign(
+                reinterpret_cast<const uint8_t*>(decoded.data()),
+                reinterpret_cast<const uint8_t*>(decoded.data()) + decoded.size());
             return out;
         }
 
@@ -474,15 +595,117 @@ private:
     std::atomic<bool> m_cleanedUp{false};
     std::mutex m_stateMutex;
     std::atomic<bool> m_readyForAudio{false};
+    // Barge-in: drop incoming raw audio until the server sends a non-audio
+    // message (which signals the old TTS response has ended).
+    std::atomic<bool> m_discardAudio{false};
 };
 
 
 namespace {
 
+    /* Session-pool allocated. tech_pvt must be passed in, not looked up through the
+       context - cleanup nulls ctx->bug before waiting. See .docs/lifecycle.md. */
+    struct write_thread_args {
+        switch_core_session_t *session;
+        private_t *tech_pvt;
+    };
+
+    void *SWITCH_THREAD_FUNC write_frame_thread(switch_thread_t *thread, void *obj) {
+        auto *args = (write_thread_args *)obj;
+        switch_core_session_t *session = args->session;
+        private_t *tech_pvt = args->tech_pvt;
+
+        /* Must be the first declaration: it publishes write_thread_done on every
+           return below, and (destroyed last) only after the timer and codec are gone. */
+        struct done_guard {
+            private_t *p;
+            ~done_guard() {
+                switch_mutex_lock(p->write_mutex);
+                p->write_thread_done = 1;
+                switch_mutex_unlock(p->write_mutex);
+            }
+        } guard{tech_pvt};
+
+        switch_channel_t *channel = switch_core_session_get_channel(session);
+        if (!channel) return NULL;
+
+        /* Cleanup can win the race against our first instruction. */
+        if (__atomic_load_n(&tech_pvt->close_requested, __ATOMIC_RELAXED)) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                              "write_frame_thread: close already requested, not starting\n");
+            return NULL;
+        }
+
+        switch_timer_t timer = {0};
+        switch_frame_t write_frame = {0};
+        switch_codec_t write_codec = {0};
+        switch_codec_t *read_codec;
+
+        uint32_t sample_rate = tech_pvt->sampling;
+        uint32_t channels = tech_pvt->channels;
+
+        read_codec = switch_core_session_get_read_codec(session);
+        if (!read_codec || !read_codec->implementation) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "write_frame_thread: no read codec available, shutting down\n");
+            return NULL;
+        }
+
+        uint32_t interval = read_codec->implementation->microseconds_per_packet / 1000;
+        uint32_t samples = switch_samples_per_packet(sample_rate, interval);
+        uint32_t tsamples = read_codec->implementation->actual_samples_per_second;
+        uint32_t bytes = samples * 2 * channels;
+
+        if (switch_core_codec_init(&write_codec, "L16", NULL, NULL, sample_rate, interval, channels,
+                                   SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE, NULL,
+                                   switch_core_session_get_pool(session)) != SWITCH_STATUS_SUCCESS) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                              "write_frame_thread: Codec Init Failed. Cannot Start Write Thread\n");
+            return NULL;
+        }
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                          "Codec Activated L16@%uhz %u channels %dms\n", sample_rate, channels, interval);
+        write_frame.codec = &write_codec;
+        write_frame.data = switch_core_session_alloc(session, SWITCH_RECOMMENDED_BUFFER_SIZE);
+        write_frame.channels = channels;
+        write_frame.rate = sample_rate;
+        write_frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
+
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                          "started write frame thread with sample rate [%u] interval [%u] samples [%u] tsamples [%u] bytes [%u]\n",
+                          sample_rate, interval, samples, tsamples, bytes);
+
+        if (switch_core_timer_init(&timer, "soft", interval, tsamples, NULL) != SWITCH_STATUS_SUCCESS) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Timer Setup Failed. Cannot Start Write Thread\n");
+            switch_core_codec_destroy(&write_codec);
+            return NULL;
+        }
+
+        while (!__atomic_load_n(&tech_pvt->close_requested, __ATOMIC_RELAXED) && switch_core_session_running(session)) {
+            if (switch_mutex_trylock(tech_pvt->write_mutex) == SWITCH_STATUS_SUCCESS) {
+                switch_size_t available = switch_buffer_inuse(tech_pvt->write_sbuffer);
+                if (available >= bytes) {
+                    write_frame.datalen = (uint32_t)switch_buffer_read(tech_pvt->write_sbuffer, write_frame.data, bytes);
+                    write_frame.samples = write_frame.datalen / 2 / channels;
+                    /* Required: writing to a dying channel blocks on the session I/O
+                       lock that teardown holds, deadlocking cleanup. */
+                    if (switch_channel_ready(channel)) {
+                        switch_core_session_write_frame(session, &write_frame, SWITCH_IO_FLAG_NONE, 0);
+                    }
+                }
+                switch_mutex_unlock(tech_pvt->write_mutex);
+            }
+            switch_core_timer_next(&timer);
+        }
+
+        switch_core_timer_destroy(&timer);
+        switch_core_codec_destroy(&write_codec);
+        return NULL;
+    }
+
     switch_status_t stream_data_init(private_t *tech_pvt, switch_core_session_t *session, char *wsUri,
                                      uint32_t sampling, int desiredSampling, int channels, char *metadata, responseHandler_t responseHandler,
                                      int deflate, int heart_beat, bool suppressLog, int rtp_packets, const char* extra_headers,
-                                     const char *tls_cafile, const char *tls_keyfile, const char *tls_certfile, 
+                                     const char *tls_cafile, const char *tls_keyfile, const char *tls_certfile,
                                      bool tls_disable_hostname_validation)
     {
         int err; //speex
@@ -491,9 +714,10 @@ namespace {
 
         memset(tech_pvt, 0, sizeof(private_t));
 
-        strncpy(tech_pvt->sessionId, switch_core_session_get_uuid(session), MAX_SESSION_ID);
-        strncpy(tech_pvt->ws_uri, wsUri, MAX_WS_URI);
-        tech_pvt->sampling = desiredSampling;
+        strncpy(tech_pvt->sessionId, switch_core_session_get_uuid(session), MAX_SESSION_ID - 1);
+        strncpy(tech_pvt->ws_uri, wsUri, MAX_WS_URI - 1);
+        tech_pvt->sampling = sampling;
+        tech_pvt->wsSampling = desiredSampling;
         tech_pvt->responseHandler = responseHandler;
         tech_pvt->rtp_packets = rtp_packets;
         tech_pvt->channels = channels;
@@ -501,7 +725,7 @@ namespace {
 
         //size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * 1000 / RTP_PERIOD * BUFFERED_SEC);
         const size_t buflen = (FRAME_SIZE_8000 * desiredSampling / 8000 * channels * rtp_packets);
-        
+
         auto sp = AudioStreamer::create(tech_pvt->sessionId, wsUri, metadata, responseHandler, deflate, heart_beat,
                                         suppressLog, extra_headers, tls_cafile, tls_keyfile,
                                         tls_certfile, tls_disable_hostname_validation);
@@ -509,18 +733,30 @@ namespace {
         tech_pvt->pAudioStreamer = new std::shared_ptr<AudioStreamer>(sp);
 
         switch_mutex_init(&tech_pvt->mutex, SWITCH_MUTEX_NESTED, pool);
-        
-        if (switch_buffer_create(pool, &tech_pvt->sbuffer, buflen) != SWITCH_STATUS_SUCCESS) {
+        switch_mutex_init(&tech_pvt->write_mutex, SWITCH_MUTEX_NESTED, pool);
+
+        if (switch_buffer_create(pool, &tech_pvt->read_sbuffer, buflen) != SWITCH_STATUS_SUCCESS) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-                "%s: Error creating switch buffer.\n", tech_pvt->sessionId);
+                "%s: Error creating read switch buffer.\n", tech_pvt->sessionId);
+            return SWITCH_STATUS_FALSE;
+        }
+
+        if (switch_buffer_create(pool, &tech_pvt->write_sbuffer, buflen) != SWITCH_STATUS_SUCCESS) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                "%s: Error creating write switch buffer.\n", tech_pvt->sessionId);
             return SWITCH_STATUS_FALSE;
         }
 
         if (desiredSampling != sampling) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) resampling from %u to %u\n", tech_pvt->sessionId, sampling, desiredSampling);
-            tech_pvt->resampler = speex_resampler_init(channels, sampling, desiredSampling, SWITCH_RESAMPLE_QUALITY, &err);
+            tech_pvt->read_resampler = speex_resampler_init(channels, sampling, desiredSampling, SWITCH_RESAMPLE_QUALITY, &err);
             if (0 != err) {
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error initializing resampler: %s.\n", speex_resampler_strerror(err));
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error initializing read resampler: %s.\n", speex_resampler_strerror(err));
+                return SWITCH_STATUS_FALSE;
+            }
+            tech_pvt->write_resampler = speex_resampler_init(channels, desiredSampling, sampling, SWITCH_RESAMPLE_QUALITY, &err);
+            if (0 != err) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error initializing write resampler: %s.\n", speex_resampler_strerror(err));
                 return SWITCH_STATUS_FALSE;
             }
         }
@@ -535,14 +771,65 @@ namespace {
 
     void destroy_tech_pvt(private_t* tech_pvt) {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "%s destroy_tech_pvt\n", tech_pvt->sessionId);
-        if (tech_pvt->resampler) {
-            speex_resampler_destroy(tech_pvt->resampler);
-            tech_pvt->resampler = nullptr;
+        if (tech_pvt->read_resampler) {
+            speex_resampler_destroy(tech_pvt->read_resampler);
+            tech_pvt->read_resampler = nullptr;
+        }
+        if (tech_pvt->write_resampler) {
+            speex_resampler_destroy(tech_pvt->write_resampler);
+            tech_pvt->write_resampler = nullptr;
         }
         if (tech_pvt->mutex) {
             switch_mutex_destroy(tech_pvt->mutex);
             tech_pvt->mutex = nullptr;
         }
+        if (tech_pvt->write_mutex) {
+            switch_mutex_destroy(tech_pvt->write_mutex);
+            tech_pvt->write_mutex = nullptr;
+        }
+        if (tech_pvt->read_sbuffer) {
+            switch_buffer_destroy(&tech_pvt->read_sbuffer);
+            tech_pvt->read_sbuffer = nullptr;
+        }
+        if (tech_pvt->write_sbuffer) {
+            switch_buffer_destroy(&tech_pvt->write_sbuffer);
+            tech_pvt->write_sbuffer = nullptr;
+        }
+    }
+
+    /* shared_ptr copy of the running stream's AudioStreamer, or empty (reason logged). */
+    std::shared_ptr<AudioStreamer> active_streamer(switch_core_session_t *session, const char *who) {
+        switch_channel_t *channel = switch_core_session_get_channel(session);
+        auto *ctx = (stream_context_t*)switch_channel_get_private(channel, MY_STREAM_CONTEXT);
+        std::shared_ptr<AudioStreamer> streamer;
+
+        if (!ctx) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "%s failed because no bug\n", who);
+            return streamer;
+        }
+
+        switch_mutex_lock(ctx->mutex);
+        auto *bug = ctx->bug;
+        if (!bug || (ctx->state != STREAM_STATE_ACTIVE && ctx->state != STREAM_STATE_PAUSED)) {
+            switch_mutex_unlock(ctx->mutex);
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "%s failed because stream is not active\n", who);
+            return streamer;
+        }
+
+        auto *tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
+        if (tech_pvt) {
+            switch_mutex_lock(tech_pvt->mutex);
+            if (tech_pvt->pAudioStreamer) {
+                auto sp_wrap = static_cast<std::shared_ptr<AudioStreamer>*>(tech_pvt->pAudioStreamer);
+                if (sp_wrap && *sp_wrap) {
+                    streamer = *sp_wrap; // copy shared_ptr
+                }
+            }
+            switch_mutex_unlock(tech_pvt->mutex);
+        }
+        switch_mutex_unlock(ctx->mutex);
+
+        return streamer;
     }
 
 }
@@ -590,6 +877,10 @@ extern "C" {
             }
         }
 
+        if (std::strlen(url) >= MAX_WS_URI) {
+            return 0;
+        }
+
         // Copy valid URI to wsUri
         std::strncpy(wsUri, url, MAX_WS_URI);
         return 1;
@@ -628,47 +919,11 @@ extern "C" {
     }
 
     switch_status_t stream_session_send_text(switch_core_session_t *session, char* text) {
-        switch_channel_t *channel = switch_core_session_get_channel(session);
-        auto *ctx = (stream_context_t*)switch_channel_get_private(channel, MY_STREAM_CONTEXT);
-        if (!ctx) {
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "stream_session_send_text failed because no bug\n");
-            return SWITCH_STATUS_FALSE;
-        }
+        auto streamer = active_streamer(session, "stream_session_send_text");
+        if (!streamer) return SWITCH_STATUS_FALSE;
 
-        switch_mutex_lock(ctx->mutex);
-        auto *bug = ctx->bug;
-        if (!bug || (ctx->state != STREAM_STATE_ACTIVE && ctx->state != STREAM_STATE_PAUSED)) {
-            switch_mutex_unlock(ctx->mutex);
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "stream_session_send_text failed because stream is not active\n");
-            return SWITCH_STATUS_FALSE;
-        }
-        auto *tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
-
-        if (!tech_pvt) {
-            switch_mutex_unlock(ctx->mutex);
-            return SWITCH_STATUS_FALSE;
-        }
-
-        std::shared_ptr<AudioStreamer> streamer;
-
-        switch_mutex_lock(tech_pvt->mutex);
-
-        if (tech_pvt->pAudioStreamer) {
-            auto sp_wrap = static_cast<std::shared_ptr<AudioStreamer>*>(tech_pvt->pAudioStreamer);
-            if (sp_wrap && *sp_wrap) {
-                streamer = *sp_wrap; // copy shared_ptr
-            }
-        }
-
-        switch_mutex_unlock(tech_pvt->mutex);
-        switch_mutex_unlock(ctx->mutex);
-
-        if (streamer) {
-            streamer->writeText(text);
-            return SWITCH_STATUS_SUCCESS;
-        }
-
-        return SWITCH_STATUS_FALSE;
+        streamer->writeText(text);
+        return SWITCH_STATUS_SUCCESS;
     }
 
     switch_status_t stream_session_pauseresume(switch_core_session_t *session, int pause) {
@@ -696,10 +951,50 @@ extern "C" {
         }
 
         switch_core_media_bug_flush(bug);
-        tech_pvt->audio_paused = pause;
+        __atomic_store_n(&tech_pvt->audio_paused, pause ? 1 : 0, __ATOMIC_RELAXED);
         ctx->state = pause ? STREAM_STATE_PAUSED : STREAM_STATE_ACTIVE;
         switch_mutex_unlock(ctx->mutex);
         return SWITCH_STATUS_SUCCESS;
+    }
+
+    switch_status_t stream_session_flush(switch_core_session_t *session) {
+        auto streamer = active_streamer(session, "stream_session_flush");
+        if (!streamer) return SWITCH_STATUS_FALSE;
+
+        // Audio already decoded into write_sbuffer is at most one chunk and is
+        // left to play out; only audio still arriving from the websocket is dropped.
+        streamer->discardIncomingAudio();
+
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                          "stream_session_flush: incoming audio discarded until the next non-audio message\n");
+        return SWITCH_STATUS_SUCCESS;
+    }
+
+    /* Teardown for a tech_pvt whose bug was never attached (or never published):
+       no bug to remove, no write thread to wait for. */
+    void stream_session_discard(void *userData) {
+        auto *tech_pvt = static_cast<private_t*>(userData);
+        if (!tech_pvt) return;
+
+        std::shared_ptr<AudioStreamer>* sp_wrap = nullptr;
+        std::shared_ptr<AudioStreamer> streamer;
+
+        switch_mutex_lock(tech_pvt->mutex);
+        if (!__atomic_load_n(&tech_pvt->cleanup_started, __ATOMIC_RELAXED)) {
+            __atomic_store_n(&tech_pvt->cleanup_started, 1, __ATOMIC_RELAXED);
+            __atomic_store_n(&tech_pvt->close_requested, 1, __ATOMIC_RELAXED);
+            sp_wrap = static_cast<std::shared_ptr<AudioStreamer>*>(tech_pvt->pAudioStreamer);
+            tech_pvt->pAudioStreamer = nullptr;
+            if (sp_wrap && *sp_wrap) streamer = *sp_wrap;
+        }
+        switch_mutex_unlock(tech_pvt->mutex);
+
+        if (sp_wrap) delete sp_wrap;
+        if (streamer) {
+            streamer->markCleanedUp();
+            streamer->disconnect();
+        }
+        destroy_tech_pvt(tech_pvt);
     }
 
     switch_status_t stream_session_init(switch_core_session_t *session,
@@ -711,14 +1006,15 @@ extern "C" {
                                         char* metadata,
                                         void **ppUserData)
     {
-        int deflate, heart_beat;
+        int deflate = 0;
+        int heart_beat = 0;
         bool suppressLog = false;
         const char* buffer_size;
         const char* extra_headers;
         int rtp_packets = 1; //20ms burst
-        const char* tls_cafile = NULL;;
-        const char* tls_keyfile = NULL;;
-        const char* tls_certfile = NULL;;
+        const char* tls_cafile = NULL;
+        const char* tls_keyfile = NULL;
+        const char* tls_certfile = NULL;
         bool tls_disable_hostname_validation = false;
 
         switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -767,10 +1063,10 @@ extern "C" {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "error allocating memory!\n");
             return SWITCH_STATUS_FALSE;
         }
-        if (SWITCH_STATUS_SUCCESS != stream_data_init(tech_pvt, session, wsUri, samples_per_second, sampling, channels, 
-                                                        metadata, responseHandler, deflate, heart_beat, suppressLog, rtp_packets, 
+        if (SWITCH_STATUS_SUCCESS != stream_data_init(tech_pvt, session, wsUri, samples_per_second, sampling, channels,
+                                                        metadata, responseHandler, deflate, heart_beat, suppressLog, rtp_packets,
                                                         extra_headers, tls_cafile, tls_keyfile, tls_certfile, tls_disable_hostname_validation)) {
-            destroy_tech_pvt(tech_pvt);
+            stream_session_discard(tech_pvt);
             return SWITCH_STATUS_FALSE;
         }
 
@@ -779,11 +1075,49 @@ extern "C" {
         return SWITCH_STATUS_SUCCESS;
     }
 
+    switch_status_t stream_session_write_thread_init(switch_core_session_t *session, void *pUserData) {
+        private_t *tech_pvt = (private_t *)pUserData;
+        switch_memory_pool_t *pool = switch_core_session_get_pool(session);
+        switch_threadattr_t *thd_attr = NULL;
+        switch_status_t status;
+
+        auto *args = (write_thread_args *)switch_core_session_alloc(session, sizeof(write_thread_args));
+        if (!args) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                              "(%s) error allocating write thread args\n", tech_pvt->sessionId);
+            tech_pvt->write_thread = nullptr;
+            tech_pvt->write_thread_done = 1;
+            return SWITCH_STATUS_FALSE;
+        }
+        args->session = session;
+        args->tech_pvt = tech_pvt;
+
+        switch_threadattr_create(&thd_attr, pool);
+        /* Detached, NOT joinable: cleanup cannot join on the hangup path, and an
+           unjoined joinable thread leaks its stack mapping. See .docs/lifecycle.md. */
+        switch_threadattr_detach_set(thd_attr, 1);
+        switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
+        tech_pvt->write_thread_done = 0;
+
+        status = switch_thread_create(&tech_pvt->write_thread, thd_attr, write_frame_thread, args, pool);
+        if (status != SWITCH_STATUS_SUCCESS) {
+            /* apr_thread_create() leaves the handle set on failure; clearing it keeps
+               cleanup from waiting out the timeout for a thread that never ran. */
+            tech_pvt->write_thread = nullptr;
+            tech_pvt->write_thread_done = 1;
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                              "(%s) failed to create write frame thread (%d)\n", tech_pvt->sessionId, status);
+            return SWITCH_STATUS_FALSE;
+        }
+        return SWITCH_STATUS_SUCCESS;
+    }
+
     switch_bool_t stream_frame(switch_media_bug_t *bug) {
         auto *tech_pvt = (private_t *)switch_core_media_bug_get_user_data(bug);
         if (!tech_pvt) return SWITCH_TRUE;
-        if (tech_pvt->audio_paused || tech_pvt->cleanup_started) return SWITCH_TRUE;
-        
+        if (__atomic_load_n(&tech_pvt->audio_paused, __ATOMIC_RELAXED) ||
+            __atomic_load_n(&tech_pvt->cleanup_started, __ATOMIC_RELAXED)) return SWITCH_TRUE;
+
         std::shared_ptr<AudioStreamer> streamer;
         std::vector<std::vector<uint8_t>> pending_send;
 
@@ -804,12 +1138,12 @@ extern "C" {
 
         streamer = *sp_ptr;
 
-        auto *resampler = tech_pvt->resampler;
+        auto *resampler = tech_pvt->read_resampler;
         const int channels = tech_pvt->channels;
         const int rtp_packets = tech_pvt->rtp_packets;
 
         if (nullptr == resampler) {
-            
+
             uint8_t data_buf[SWITCH_RECOMMENDED_BUFFER_SIZE];
             switch_frame_t frame = {};
             frame.data = data_buf;
@@ -825,23 +1159,23 @@ extern "C" {
                     continue;
                 }
 
-                size_t freespace = switch_buffer_freespace(tech_pvt->sbuffer);
-                
+                size_t freespace = switch_buffer_freespace(tech_pvt->read_sbuffer);
+
                 if (freespace >= frame.datalen) {
-                    switch_buffer_write(tech_pvt->sbuffer, static_cast<uint8_t *>(frame.data), frame.datalen);
+                    switch_buffer_write(tech_pvt->read_sbuffer, static_cast<uint8_t *>(frame.data), frame.datalen);
                 }
 
-                if (switch_buffer_freespace(tech_pvt->sbuffer) == 0) {
-                    switch_size_t inuse = switch_buffer_inuse(tech_pvt->sbuffer);
+                if (switch_buffer_freespace(tech_pvt->read_sbuffer) == 0) {
+                    switch_size_t inuse = switch_buffer_inuse(tech_pvt->read_sbuffer);
                     if (inuse > 0) {
                         std::vector<uint8_t> tmp(inuse);
-                        switch_buffer_read(tech_pvt->sbuffer, tmp.data(), inuse);
-                        switch_buffer_zero(tech_pvt->sbuffer);
+                        switch_buffer_read(tech_pvt->read_sbuffer, tmp.data(), inuse);
+                        switch_buffer_zero(tech_pvt->read_sbuffer);
                         pending_send.emplace_back(std::move(tmp));
                     }
                 }
             }
-            
+
         } else {
 
             uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
@@ -854,17 +1188,17 @@ extern "C" {
                     continue;
                 }
 
-                const size_t freespace = switch_buffer_freespace(tech_pvt->sbuffer);
+                const size_t freespace = switch_buffer_freespace(tech_pvt->read_sbuffer);
                 spx_uint32_t in_len = frame.samples;
                 spx_uint32_t out_len = (freespace / (tech_pvt->channels * sizeof(spx_int16_t)));
-                
+
                 if(out_len == 0) {
                     if(freespace == 0) {
-                        switch_size_t inuse = switch_buffer_inuse(tech_pvt->sbuffer);
+                        switch_size_t inuse = switch_buffer_inuse(tech_pvt->read_sbuffer);
                         if (inuse > 0) {
                             std::vector<uint8_t> tmp(inuse);
-                            switch_buffer_read(tech_pvt->sbuffer, tmp.data(), inuse);
-                            switch_buffer_zero(tech_pvt->sbuffer);
+                            switch_buffer_read(tech_pvt->read_sbuffer, tmp.data(), inuse);
+                            switch_buffer_zero(tech_pvt->read_sbuffer);
                             pending_send.emplace_back(std::move(tmp));
                         }
                     }
@@ -898,25 +1232,25 @@ extern "C" {
                         continue;
                     }
 
-                    if (bytes_written <= switch_buffer_freespace(tech_pvt->sbuffer)) {
-                        switch_buffer_write(tech_pvt->sbuffer, (const uint8_t *)out.data(), bytes_written);
+                    if (bytes_written <= switch_buffer_freespace(tech_pvt->read_sbuffer)) {
+                        switch_buffer_write(tech_pvt->read_sbuffer, (const uint8_t *)out.data(), bytes_written);
                     }
                 }
 
-                if (switch_buffer_freespace(tech_pvt->sbuffer) == 0) {
-                    switch_size_t inuse = switch_buffer_inuse(tech_pvt->sbuffer);
+                if (switch_buffer_freespace(tech_pvt->read_sbuffer) == 0) {
+                    switch_size_t inuse = switch_buffer_inuse(tech_pvt->read_sbuffer);
                     if (inuse > 0) {
                         std::vector<uint8_t> tmp(inuse);
-                        switch_buffer_read(tech_pvt->sbuffer, tmp.data(), inuse);
-                        switch_buffer_zero(tech_pvt->sbuffer);
+                        switch_buffer_read(tech_pvt->read_sbuffer, tmp.data(), inuse);
+                        switch_buffer_zero(tech_pvt->read_sbuffer);
                         pending_send.emplace_back(std::move(tmp));
                     }
                 }
             }
         }
-        
+
         switch_mutex_unlock(tech_pvt->mutex);
-    
+
         if (!streamer || !streamer->isConnected()) return SWITCH_TRUE;
 
         for (auto &chunk : pending_send) {
@@ -952,15 +1286,18 @@ extern "C" {
 
             std::shared_ptr<AudioStreamer>* sp_wrap = nullptr;
             std::shared_ptr<AudioStreamer> streamer;
+            switch_thread_t *write_thread = nullptr;
+            int write_thread_exited = 1; /* no thread to wait for -> full cleanup */
 
             switch_mutex_lock(tech_pvt->mutex);
 
-            if (tech_pvt->cleanup_started) {
+            if (__atomic_load_n(&tech_pvt->cleanup_started, __ATOMIC_RELAXED)) {
                 switch_mutex_unlock(tech_pvt->mutex);
                 return SWITCH_STATUS_SUCCESS;
             }
 
-            tech_pvt->cleanup_started = 1;
+            __atomic_store_n(&tech_pvt->cleanup_started, 1, __ATOMIC_RELAXED);
+            __atomic_store_n(&tech_pvt->close_requested, 1, __ATOMIC_RELAXED);
 
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) stream_session_cleanup\n", sessionId);
 
@@ -970,6 +1307,9 @@ extern "C" {
             if (sp_wrap && *sp_wrap) {
                 streamer = *sp_wrap;
             }
+
+            write_thread = tech_pvt->write_thread;
+            tech_pvt->write_thread = nullptr;
 
             switch_mutex_unlock(tech_pvt->mutex);
 
@@ -985,12 +1325,87 @@ extern "C" {
             if(streamer) {
                 streamer->deleteFiles();
                 if (text) streamer->writeText(text);
-                
+
+                /* Nulls all callbacks, so no websocket event can reach session
+                   context after this point. */
                 streamer->markCleanedUp();
-                streamer->disconnect();
+
+                if (!channelIsClosing) {
+                    /* Not in the teardown path - safe to block on the close handshake. */
+                    streamer->disconnect();
+                } else {
+                    /* disconnect() blocks on the close handshake and a dead backend can
+                       stall it indefinitely, so hand it to a detached thread; the moved
+                       shared_ptr keeps the AudioStreamer alive until it finishes.
+                       The catch is load-bearing, not style: we unwind into a C frame
+                       (switch_core_media_bug_close), so an escaping exception would
+                       std::terminate all of FreeSWITCH. See .docs/lifecycle.md. */
+                    try {
+                        std::thread([s = std::move(streamer)]() mutable {
+                            s->disconnect();
+                        }).detach();
+                    } catch (const std::exception &e) {
+                        /* streamer died with the closure; no synchronous fallback -
+                           that would block teardown, which is what we are avoiding. */
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                                          "(%s) stream_session_cleanup: could not spawn disconnect "
+                                          "thread (%s); closing without handshake\n", sessionId, e.what());
+                    } catch (...) {
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                                          "(%s) stream_session_cleanup: could not spawn disconnect "
+                                          "thread; closing without handshake\n", sessionId);
+                    }
+                }
             }
 
-            destroy_tech_pvt(tech_pvt);
+            if (write_thread) {
+                if (!channelIsClosing) {
+                    /* destroy_tech_pvt() below frees write_mutex and write_sbuffer, so
+                       the thread must be out of its loop first. It is detached, so no
+                       join - wait on write_thread_done (normally ~20 ms). */
+                    int waited_ms = 0;
+                    for (;;) {
+                        switch_mutex_lock(tech_pvt->write_mutex);
+                        write_thread_exited = tech_pvt->write_thread_done;
+                        switch_mutex_unlock(tech_pvt->write_mutex);
+                        if (write_thread_exited || waited_ms >= WRITE_THREAD_EXIT_TIMEOUT_MS) break;
+                        switch_yield(5000); /* 5 ms */
+                        waited_ms += 5;
+                    }
+                    if (!write_thread_exited) {
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                                          "(%s) stream_session_cleanup: write thread did not report exit within "
+                                          "%d ms; skipping destroy_tech_pvt to avoid use-after-free\n",
+                                          sessionId, WRITE_THREAD_EXIT_TIMEOUT_MS);
+                    }
+                } else {
+                    /* Cannot wait here: we are inside SWITCH_ABC_TYPE_CLOSE and the
+                       teardown holds the session I/O lock. The detached thread self-exits
+                       within a timer tick and needs no reclaiming.
+                       Best-effort only - nothing orders that exit against the session pool
+                       being freed. See .docs/lifecycle.md. */
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                                      "(%s) stream_session_cleanup: not waiting for write thread on channel close "
+                                      "(close_requested set, detached thread will self-exit)\n", sessionId);
+                }
+            }
+
+            if (!channelIsClosing && write_thread_exited) {
+                destroy_tech_pvt(tech_pvt);
+            } else {
+                /* Write thread may still be live (hangup path, or the wait timed out).
+                   Leave write_mutex/write_sbuffer to the session pool, but the speex
+                   resamplers are malloc'd - the pool never reclaims them, and the write
+                   thread never touches them, so free them here. */
+                if (tech_pvt->read_resampler) {
+                    speex_resampler_destroy(tech_pvt->read_resampler);
+                    tech_pvt->read_resampler = nullptr;
+                }
+                if (tech_pvt->write_resampler) {
+                    speex_resampler_destroy(tech_pvt->write_resampler);
+                    tech_pvt->write_resampler = nullptr;
+                }
+            }
 
             if (!channelIsClosing) {
                 switch_mutex_lock(ctx->mutex);
@@ -1004,29 +1419,5 @@ extern "C" {
 
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "stream_session_cleanup: no bug - websocket connection already closed\n");
         return SWITCH_STATUS_FALSE;
-    }
-
-    void stream_session_discard(void *userData) {
-        auto *tech_pvt = static_cast<private_t*>(userData);
-        if (!tech_pvt) return;
-
-        std::shared_ptr<AudioStreamer>* sp_wrap = nullptr;
-        std::shared_ptr<AudioStreamer> streamer;
-
-        switch_mutex_lock(tech_pvt->mutex);
-        if (!tech_pvt->cleanup_started) {
-            tech_pvt->cleanup_started = 1;
-            sp_wrap = static_cast<std::shared_ptr<AudioStreamer>*>(tech_pvt->pAudioStreamer);
-            tech_pvt->pAudioStreamer = nullptr;
-            if (sp_wrap && *sp_wrap) streamer = *sp_wrap;
-        }
-        switch_mutex_unlock(tech_pvt->mutex);
-
-        if (sp_wrap) delete sp_wrap;
-        if (streamer) {
-            streamer->markCleanedUp();
-            streamer->disconnect();
-        }
-        destroy_tech_pvt(tech_pvt);
     }
 }

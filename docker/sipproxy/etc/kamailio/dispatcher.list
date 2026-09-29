@@ -1,0 +1,2 @@
+#setid sipdest flags priority attrs
+0 sip:10.25.0.3:5060 2 0 socket=udp:10.25.0.2:4060
