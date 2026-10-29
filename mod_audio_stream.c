@@ -249,6 +249,40 @@ static switch_status_t send_text(switch_core_session_t *session, char* text) {
     return stream_session_send_text(session, text);
 }
 
+/* Reads incoming RTP frames on the channel thread (driving media bugs and NAT
+   auto-adjust) and writes native silence frames back out, keeping the RTP clock
+   and write buffer active without echoing the caller's audio. */
+SWITCH_STANDARD_APP(audio_stream_park_function)
+{
+    switch_channel_t *channel = switch_core_session_get_channel(session);
+    switch_frame_t *read_frame;
+    switch_status_t status;
+
+    while (switch_channel_ready(channel)) {
+        status = switch_core_session_read_frame(session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
+        if (!SWITCH_READ_ACCEPTABLE(status)) {
+            break;
+        }
+        if (read_frame && read_frame->data && read_frame->datalen &&
+            !switch_test_flag(read_frame, SFF_CNG)) {
+            int silence_byte = 0;
+            if (read_frame->codec && read_frame->codec->implementation) {
+                uint32_t ianacode = read_frame->codec->implementation->ianacode;
+                if (ianacode == 0) {
+                    silence_byte = 0xFF; /* G.711 PCMU digital silence */
+                } else if (ianacode == 8) {
+                    silence_byte = 0xD5; /* G.711 PCMA digital silence */
+                }
+            }
+            memset(read_frame->data, silence_byte, read_frame->datalen);
+        }
+        switch_core_session_write_frame(session, read_frame, SWITCH_IO_FLAG_NONE, 0);
+        if (switch_core_session_private_event_count(session)) {
+            switch_ivr_parse_all_events(session);
+        }
+    }
+}
+
 #define STREAM_API_SYNTAX "<uuid> [start | stop | send_text | pause | resume | flush ] [wss-url | path] [mono | mixed | stereo] [8k | 16k | <hz>] [metadata]"
 SWITCH_STANDARD_API(stream_function)
 {
@@ -363,6 +397,7 @@ done:
 SWITCH_MODULE_LOAD_FUNCTION(mod_audio_stream_load)
 {
     switch_api_interface_t *api_interface;
+    switch_application_interface_t *app_interface;
 
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "mod_audio_stream API loading..\n");
 
@@ -385,6 +420,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_audio_stream_load)
         return SWITCH_STATUS_TERM;
     }
     SWITCH_ADD_API(api_interface, "uuid_audio_stream", "audio_stream API", stream_function, STREAM_API_SYNTAX);
+    SWITCH_ADD_APP(app_interface, "audio_stream_park", "Park channel with silent RTP clock for audio_stream", "Park channel with silent RTP clock for audio_stream", audio_stream_park_function, "", SAF_NONE);
     switch_console_set_complete("add uuid_audio_stream ::console::list_uuid start wss-url metadata");
     switch_console_set_complete("add uuid_audio_stream ::console::list_uuid start wss-url");
     switch_console_set_complete("add uuid_audio_stream ::console::list_uuid stop");
